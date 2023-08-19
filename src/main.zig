@@ -26,8 +26,6 @@ const CURVE_COUNT = 8;
 
 const VULKAN_VERSION = vk.API_VERSION_1_3;
 
-const CURVE_INSTANCES_BUFFER_SIZE = CURVE_COUNT * @sizeOf(CurveInstance);
-
 // This has nothing to do with window size; I'm just using the same values as the old program, which used
 // window size.
 const WORLD_SIZE_X: f32 = 1920;
@@ -65,9 +63,16 @@ var swapchain_image_acquired_semaphore_: vk.Semaphore = undefined;
 var render_finished_semaphore_: vk.Semaphore = undefined;
 var command_buffer_pending_fence_: vk.Fence = undefined;
 
-var curves_: []CurveInstance = undefined;
-var curve_instances_buffer_: AllocatedBuffer = undefined;
-var mapped_curve_instances_buffer_ptr_: [*]u8 = undefined;
+
+var curve_control_points_: []CurveControlPoints = undefined;
+var curve_colors_: []CurveColors = undefined;
+
+var curves_buffer_: AllocatedBuffer = undefined;
+var curve_control_points_offset_in_buffer_: vk.DeviceSize = undefined;
+var curve_colors_offset_in_buffer_: vk.DeviceSize = undefined;
+
+var mapped_curve_control_points_ptr_: [*]u8 = undefined;
+var mapped_curve_colors_ptr_: [*]u8 = undefined;
 
 //
 // ===========================================================================================================
@@ -80,15 +85,18 @@ pub fn main() !void {
     try init(allocator, 800, 450);
 
     // @todo @placeholder, should initialize randomly in `init()`
-    for (0..curves_.len) |curve_index| {
-        curves_[curve_index] = CurveInstance {
-            .control_point_1_pos = .{ 100.0 + 100.0*@as(f32, @floatFromInt(curve_index)), 100.0 },
-            .control_point_2_pos = .{ 500.0 + 100.0*@as(f32, @floatFromInt(curve_index)), 200.0 },
-            .control_point_3_pos = .{ 100.0 + 100.0*@as(f32, @floatFromInt(curve_index)), 300.0 },
-            .control_point_4_pos = .{ 300.0 + 100.0*@as(f32, @floatFromInt(curve_index)), 400.0 },
+    for (0..CURVE_COUNT) |curve_index| {
 
-            .control_point_1_color = .{   0, 255, 255, 255 },
-            .control_point_4_color = .{ 255, 255,   0, 255 },
+        curve_control_points_[curve_index] = CurveControlPoints {
+            .point_1_pos = .{ 100.0 + 100.0*@as(f32, @floatFromInt(curve_index)), 100.0 },
+            .point_2_pos = .{ 500.0 + 100.0*@as(f32, @floatFromInt(curve_index)), 200.0 },
+            .point_3_pos = .{ 100.0 + 100.0*@as(f32, @floatFromInt(curve_index)), 300.0 },
+            .point_4_pos = .{ 300.0 + 100.0*@as(f32, @floatFromInt(curve_index)), 400.0 },
+        };
+
+        curve_colors_[curve_index] = CurveColors {
+            .start_color = .{   0, 255, 255, 255 },
+            .end_color   = .{ 255, 255,   0, 255 },
         };
     }
 
@@ -118,16 +126,20 @@ fn draw() !void {
     try vk_procs_.device.resetFences(device_, 1, asUnitArrayPtr(&command_buffer_pending_fence_));
 
 
-    @memcpy(mapped_curve_instances_buffer_ptr_, std.mem.sliceAsBytes(curves_));
+    @memcpy(mapped_curve_control_points_ptr_, std.mem.sliceAsBytes(curve_control_points_));
+    @memcpy(mapped_curve_colors_ptr_, std.mem.sliceAsBytes(curve_colors_));
 
+    const memory_ranges_to_flush = [1]vk.MappedMemoryRange {
+        .{
+            .memory = curves_buffer_.backing_memory,
+            .offset = curves_buffer_.offset_in_memory,
+            .size = curves_buffer_.size,
+        },
+    };
     try vk_procs_.device.flushMappedMemoryRanges(
         device_,
-        1,
-        asUnitArrayPtr(&vk.MappedMemoryRange {
-            .memory = curve_instances_buffer_.backing_memory,
-            .offset = curve_instances_buffer_.offset_in_memory,
-            .size = curve_instances_buffer_.size,
-        }),
+        memory_ranges_to_flush.len,
+        &memory_ranges_to_flush,
     );
 
 
@@ -184,12 +196,21 @@ fn draw() !void {
             asUnitArrayPtr(&render_area_),
         );
 
+        const vertex_buffer_binding_count = 2;
+        const vertex_buffer_binding_buffers = [vertex_buffer_binding_count]vk.Buffer {
+            curves_buffer_.buffer,
+            curves_buffer_.buffer,
+        };
+        const vertex_buffer_binding_offsets = [vertex_buffer_binding_count]vk.DeviceSize {
+            curve_control_points_offset_in_buffer_,
+            curve_colors_offset_in_buffer_,
+        };
         vk_procs_.device.cmdBindVertexBuffers(
             command_buffer_,
             0, // first_binding
-            1, // binding_count
-            asUnitArrayPtr(&curve_instances_buffer_.buffer),
-            asUnitArrayPtr(&curve_instances_buffer_.offset_in_memory),
+            vertex_buffer_binding_count, // binding_count
+            &vertex_buffer_binding_buffers,
+            &vertex_buffer_binding_offsets,
         );
 
         vk_procs_.device.cmdDraw(
@@ -563,51 +584,58 @@ fn init(allocator: Allocator, window_width: u32, window_height: u32) !void {
         .{
             .location = 0,
             .binding = 0,
-            .format = CurveInstance.control_point_pos_format,
-            .offset = @offsetOf(CurveInstance, "control_point_1_pos"),
+            .format = CurveControlPoints.pos_format,
+            .offset = @offsetOf(CurveControlPoints, "point_1_pos"),
         },
         .{
             .location = 1,
             .binding = 0,
-            .format = CurveInstance.control_point_pos_format,
-            .offset = @offsetOf(CurveInstance, "control_point_2_pos"),
+            .format = CurveControlPoints.pos_format,
+            .offset = @offsetOf(CurveControlPoints, "point_2_pos"),
         },
         .{
             .location = 2,
             .binding = 0,
-            .format = CurveInstance.control_point_pos_format,
-            .offset = @offsetOf(CurveInstance, "control_point_3_pos"),
+            .format = CurveControlPoints.pos_format,
+            .offset = @offsetOf(CurveControlPoints, "point_3_pos"),
         },
         .{
             .location = 3,
             .binding = 0,
-            .format = CurveInstance.control_point_pos_format,
-            .offset = @offsetOf(CurveInstance, "control_point_4_pos"),
+            .format = CurveControlPoints.pos_format,
+            .offset = @offsetOf(CurveControlPoints, "point_4_pos"),
         },
 
         .{
             .location = 4,
-            .binding = 0,
-            .format = CurveInstance.control_point_color_format,
-            .offset = @offsetOf(CurveInstance, "control_point_1_color"),
+            .binding = 1,
+            .format = CurveColors.color_format,
+            .offset = @offsetOf(CurveColors, "start_color"),
         },
         .{
             .location = 5,
+            .binding = 1,
+            .format = CurveColors.color_format,
+            .offset = @offsetOf(CurveColors, "end_color"),
+        },
+    };
+
+    const vertex_binding_descriptions = [2]vk.VertexInputBindingDescription {
+        .{
             .binding = 0,
-            .format = CurveInstance.control_point_color_format,
-            .offset = @offsetOf(CurveInstance, "control_point_4_color"),
+            .stride = @sizeOf(CurveControlPoints),
+            .input_rate = .instance,
+        },
+        .{
+            .binding = 1,
+            .stride = @sizeOf(CurveColors),
+            .input_rate = .instance,
         },
     };
 
     const vertex_input_state_info = vk.PipelineVertexInputStateCreateInfo {
-        .vertex_binding_description_count = 1,
-        .p_vertex_binding_descriptions = &[_]vk.VertexInputBindingDescription {
-            .{
-                .binding = 0,
-                .stride = @sizeOf(CurveInstance),
-                .input_rate = .instance,
-            }
-        },
+        .vertex_binding_description_count = vertex_binding_descriptions.len,
+        .p_vertex_binding_descriptions = &vertex_binding_descriptions,
         .vertex_attribute_description_count = vertex_attribute_descriptions.len,
         .p_vertex_attribute_descriptions = &vertex_attribute_descriptions,
     };
@@ -804,25 +832,28 @@ fn init(allocator: Allocator, window_width: u32, window_height: u32) !void {
 
     // ALLOCATE CURVE INSTANCES ------------------------------------------------------------------------------
 
-    curves_ = try allocator.alloc(CurveInstance, CURVE_COUNT);
+    curve_control_points_ = try allocator.alloc(CurveControlPoints, CURVE_COUNT);
+    curve_colors_ = try allocator.alloc(CurveColors, CURVE_COUNT);
 
 
-    const curve_instances_buffer_info = vk.BufferCreateInfo {
-        .size = CURVE_INSTANCES_BUFFER_SIZE,
-        .usage = .{ .vertex_buffer_bit = true, },
+    const curve_control_points_size = CURVE_COUNT*@sizeOf(CurveControlPoints);
+    const curve_control_points_plus_padding_size =
+        util.roundUpToMultipleOf(usize, curve_control_points_size, @alignOf(CurveColors));
+    const curve_colors_size = CURVE_COUNT*@sizeOf(CurveColors);
+    const curves_buffer_size = curve_control_points_plus_padding_size + curve_colors_size;
+
+    const curves_buffer_info = vk.BufferCreateInfo {
+        .size = curves_buffer_size,
+        .usage = .{ .vertex_buffer_bit = true },
         .sharing_mode = .exclusive,
         .queue_family_index_count = 1,
         .p_queue_family_indices = &[1]u32 { queue_family },
     };
-    const curve_instances_buffer = try vk_procs_.device.createBuffer(
-        device_,
-        &curve_instances_buffer_info,
-        null,
-    );
+    const curves_buffer = try vk_procs_.device.createBuffer(device_, &curves_buffer_info, null);
 
-    const curve_instances_buffer_mem_requirements = vk_procs_.device.getBufferMemoryRequirements(
+    const curves_buffer_mem_requirements = vk_procs_.device.getBufferMemoryRequirements(
         device_,
-        curve_instances_buffer,
+        curves_buffer,
     );
 
 
@@ -832,7 +863,7 @@ fn init(allocator: Allocator, window_width: u32, window_height: u32) !void {
         device_,
         &.{
 
-            .allocation_size = curve_instances_buffer_mem_requirements.size,
+            .allocation_size = curves_buffer_mem_requirements.size,
 
             .memory_type_index = firstMemoryTypeSatisfying(
                 // @todo if you can't determine the cause of a memory bug, consider adding `.host_coherent_bit` here
@@ -845,27 +876,36 @@ fn init(allocator: Allocator, window_width: u32, window_height: u32) !void {
     );
 
 
-    try vk_procs_.device.bindBufferMemory(device_, curve_instances_buffer, device_memory, 0);
+    try vk_procs_.device.bindBufferMemory(device_, curves_buffer, device_memory, 0);
 
-    curve_instances_buffer_ = AllocatedBuffer {
-        .buffer = curve_instances_buffer,
-        .size = curve_instances_buffer_info.size,
+    curves_buffer_ = AllocatedBuffer {
+        .buffer = curves_buffer,
+        .size = curves_buffer_info.size,
         .backing_memory = device_memory,
         .offset_in_memory = 0,
     };
+    curve_control_points_offset_in_buffer_ = 0;
+    curve_colors_offset_in_buffer_ = curve_control_points_plus_padding_size;
 
 
     // keeping this persistently-mapped
-     const mapped_mem_ptr: *anyopaque = try vk_procs_.device.mapMemory(
-        device_,
-        curve_instances_buffer_.backing_memory,
-        curve_instances_buffer_.offset_in_memory,
-        curve_instances_buffer_.size,
-        .{},
-    )
-    orelse @panic("`vkMapMemory` returned a null pointer");
+    const mapped_mem_ptr: [*]u8 = blk: {
 
-    mapped_curve_instances_buffer_ptr_ = @ptrCast(mapped_mem_ptr);
+        const ptr: *anyopaque = try vk_procs_.device.mapMemory(
+            device_,
+            curves_buffer_.backing_memory,
+            curves_buffer_.offset_in_memory,
+            curves_buffer_.size,
+            .{},
+        )
+        orelse @panic("`vkMapMemory` returned a null pointer");
+
+        break :blk @ptrCast(ptr);
+    };
+
+    // @note relies on the fact that this VkBuffer has offset 0 in this VkMemory
+    mapped_curve_control_points_ptr_ = mapped_mem_ptr + curve_control_points_offset_in_buffer_;
+    mapped_curve_colors_ptr_ = mapped_mem_ptr + curve_colors_offset_in_buffer_;
 }
 
 /// Returns null if not found.
@@ -1097,20 +1137,25 @@ const VertexShaderSpecializationConstants = extern struct {
     line_thickness: f32,
 };
 
-const CurveInstance = extern struct {
-    control_point_1_pos: [2]f32 align(8),
-    control_point_2_pos: [2]f32 align(8),
-    control_point_3_pos: [2]f32 align(8),
-    control_point_4_pos: [2]f32 align(8),
+const CurveControlPoints = extern struct {
+    point_1_pos: @Vector(2, f32) align(8),
+    point_2_pos: @Vector(2, f32),
+    point_3_pos: @Vector(2, f32),
+    point_4_pos: @Vector(2, f32),
 
-    control_point_1_color: [4]u8 align(4),
-    control_point_4_color: [4]u8 align(4),
-
-    pub const control_point_pos_format = vk.Format.r32g32_sfloat;
-    pub const control_point_color_format = vk.Format.r8g8b8a8_unorm;
+    pub const pos_format = vk.Format.r32g32_sfloat;
 };
-comptime { util.assertAlignment(8, CurveInstance); }
-comptime { util.assertSize(40, CurveInstance); }
+comptime { util.assertAlignment(8, CurveControlPoints); }
+comptime { util.assertSize(8*4, CurveControlPoints); }
+
+const CurveColors = extern struct {
+    start_color: [4]u8 align(4),
+    end_color: [4]u8,
+
+    pub const color_format = vk.Format.r8g8b8a8_unorm;
+};
+comptime { util.assertAlignment(4, CurveColors); }
+comptime { util.assertSize(8, CurveColors); }
 
 const AllocatedBuffer = struct {
     buffer: vk.Buffer,

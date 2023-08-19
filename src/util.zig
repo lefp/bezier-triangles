@@ -4,6 +4,7 @@ const std = @import("std");
 
 const debug = std.debug;
 const fmt = std.fmt;
+const testing = std.testing;
 
 //
 // ===========================================================================================================
@@ -98,4 +99,25 @@ pub fn panicLocMsg(comptime location: std.builtin.SourceLocation, message: []con
     debug.panic("file {s}, line {}, message `{s}`", .{ location.file, location.line, message });
 }
 
+/// Round up an unsigned integer.
+/// `multiple_of` must not be 0.
+pub fn roundUpToMultipleOf(comptime T: type, number_to_round: T, multiple_of: T) T {
+    comptime {
+        const type_info = @typeInfo(T);
+        if (type_info != .Int or type_info.Int.signedness != .unsigned) @compileError("`T` must be an unsigned integer type");
+    }
+    debug.assert(multiple_of != 0);
 
+    return ((number_to_round + multiple_of - 1) / multiple_of) * multiple_of;
+}
+test "roundUpToMultipleOf" {
+    for ([_]u32 { 3, 4, 8 }) |divisor| {
+        try testing.expect(roundUpToMultipleOf(u32, 0, divisor) == 0);
+        for (1..divisor) |val| try testing.expect(
+            roundUpToMultipleOf(u32, @as(u32, @intCast(val)), divisor) == divisor
+        );
+    }
+    for ([_]u32 { 0, 1, 3, 4, 8 }) |val| try testing.expect(roundUpToMultipleOf(u32, val, 1) == val);
+    try testing.expect(roundUpToMultipleOf(u32, 75, 4) == 76);
+    try testing.expect(roundUpToMultipleOf(u32, 0, 16) == 0);
+}

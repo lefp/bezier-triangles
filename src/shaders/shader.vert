@@ -2,6 +2,8 @@
 
 #version 460
 
+// @todo do we have to specify the binding numbers for the input attributes?
+
 layout(location = 0) in vec2 control_point_1_pos_;
 layout(location = 1) in vec2 control_point_2_pos_;
 layout(location = 2) in vec2 control_point_3_pos_;
@@ -63,7 +65,8 @@ void main() {
 
     const float interval_length = 1.0f / float(n_line_segments_per_curve_);
 
-    const float interval_start = interval_length * float(gl_VertexIndex);
+    // @note: if you want to recreate the triangle-lines bug, don't divide by 6 here.
+    const float interval_start = interval_length * float(gl_VertexIndex / 6);
     const float interval_end = interval_start + interval_length;
 
 
