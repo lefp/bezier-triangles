@@ -65,7 +65,8 @@ void main() {
 
     const float interval_length = 1.0f / float(n_line_segments_per_curve_);
 
-    // @note: if you want to recreate the triangle-lines bug, don't divide by 6 here.
+    // @note: if you want to recreate the triangle-lines bug, don't divide by 6 here. You could also subtract
+    // (6 * n_line_segments_per_curve) / 2 or something to make the result more centered on the actual curve.
     const float interval_start = interval_length * float(gl_VertexIndex / 6);
     const float interval_end = interval_start + interval_length;
 

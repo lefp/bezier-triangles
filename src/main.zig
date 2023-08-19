@@ -9,10 +9,16 @@ const std = @import("std");
 const builtin = @import("builtin");
 const debug = std.debug;
 const log = std.log;
+const math = std.math;
 
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const asUnitArrayPtr = util.asUnitArrayPtr;
+const PI = math.pi;
+const mod = math.mod;
+const Vec2 = @Vector(2, f32);
+const Vec4 = @Vector(4, f32);
+const simd = std.simd;
 
 //
 // GLOBAL CONSTANTS ==========================================================================================
@@ -30,6 +36,27 @@ const VULKAN_VERSION = vk.API_VERSION_1_3;
 // window size.
 const WORLD_SIZE_X: f32 = 1920;
 const WORLD_SIZE_Y: f32 = 1080;
+const WORLD_SIZE = Vec2 { WORLD_SIZE_X, WORLD_SIZE_Y };
+
+const CENTER_POS = Vec2 { 0.5*WORLD_SIZE_X, 0.5*WORLD_SIZE_Y };
+const CENTER_FORCE_MAX_STRENGTH: f32 = 20.0;
+
+const CENTER_MAX_PERIOD: f32 = 150.0;
+const CENTER_MIN_PERIOD: f32 = 10.0;
+const CENTER_PERIOD_PERIOD: f32 = 500.0;
+
+const BORDER_FORCE_STRENGTH: f32 = 0.2;
+
+const NODE_RADIUS: f32 = 3.0;
+const NODE_DIAMETER: f32 = 2*NODE_RADIUS;
+
+const CHARGE_SQUARED: f32 = 0.5;
+const NODE_MASS: f32 = 0.03;
+const SPEED_LIMIT: f32 = 30;
+
+// Multiply actual delta t (i.e. frame time) by this to run the simulation faster.
+// This is a hack because I don't want to tweak all the other values to make this work.
+const DELTA_T_FACTOR: f32 = 3;
 
 //
 // GLOBAL VARIABLES ==========================================================================================
@@ -74,6 +101,18 @@ var curve_colors_offset_in_buffer_: vk.DeviceSize = undefined;
 var mapped_curve_control_points_ptr_: [*]u8 = undefined;
 var mapped_curve_colors_ptr_: [*]u8 = undefined;
 
+
+// simulation data
+
+var rng_: std.rand.DefaultPrng = undefined;
+// @todo maybe we should make this bit-packed
+var node_polarities_: []bool = undefined;
+var node_velocities_: []Vec2 = undefined;
+
+var center_period_phase_: f32 = 0; // [0, CENTER_FORCE_PERIOD_PERIOD]
+var center_period_: f32 = CENTER_MIN_PERIOD;
+var center_phase_: f32 = 0; // [0, center period)
+
 //
 // ===========================================================================================================
 //
@@ -100,16 +139,122 @@ pub fn main() !void {
         };
     }
 
+
     glfw.pollEvents();
+    var frame_timer = try std.time.Timer.start();
+
     while (!window_.shouldClose()) {
-        try update();
+
+        const last_frame_time: f32 = @as(f32, @floatFromInt(frame_timer.lap())) / 1_000_000_000.0;
+        var delta_t = DELTA_T_FACTOR * last_frame_time;
+        if (window_.getKey(.right) == .press) delta_t *= 5;
+
+
+        try update(delta_t);
         try draw();
+
 
         glfw.pollEvents();
     }
 }
 
-fn update() !void {
+fn update(delta_t: f32) !void {
+
+    center_period_phase_ = try mod(f32, center_period_phase_ + delta_t, CENTER_PERIOD_PERIOD);
+    center_period_ =
+        (@sin(center_period_phase_ / CENTER_PERIOD_PERIOD * 2*PI) + 1) * 0.5
+        * (CENTER_MAX_PERIOD - CENTER_MIN_PERIOD) + CENTER_MIN_PERIOD;
+    center_phase_ = try mod(f32, center_phase_ + delta_t, center_period_);
+
+
+    var nodes: []@Vector(2, f32) = undefined;
+    nodes.ptr = @ptrCast(curve_control_points_.ptr);
+    nodes.len = 4 * curve_control_points_.len;
+
+
+    var speed_of_fastest_node_: f32 = 0;
+
+    for (nodes, 0..) |node, node_index| {
+
+        var net_force: Vec2 = @splat(0);
+        for (nodes, 0..) |other_node, other_node_index| {
+            if (node_index == other_node_index) continue;
+
+            const displacement = other_node - node;
+            const norm_disp_squared = dotProduct(displacement, displacement);
+
+            if (norm_disp_squared <= NODE_DIAMETER*NODE_DIAMETER and node_index < other_node_index) {
+                node_polarities_[node_index] = !node_polarities_[node_index];
+            }
+
+            if (norm_disp_squared != 0) {
+                const polarity_factor: f32 =
+                    if (node_polarities_[node_index] == node_polarities_[other_node_index]) 1 else -1;
+                net_force +=
+                    displacement * @as(Vec2, @splat(polarity_factor * CHARGE_SQUARED / norm_disp_squared));
+            }
+        }
+
+        const node_index_mod_4 = node_index % 4;
+        const is_tip_node: bool = node_index_mod_4 == 0 or node_index_mod_4 == 3;
+        if (is_tip_node) {
+            const displacement = node - CENTER_POS;
+            const norm_disp_squared = dotProduct(displacement, displacement);
+
+            // don't apply a force if node intersects center
+            if (norm_disp_squared > NODE_DIAMETER*NODE_DIAMETER) {
+                net_force += displacement * @as(Vec2, @splat(
+                    CENTER_FORCE_MAX_STRENGTH * @sin(center_phase_ / center_period_ * 2*PI)
+                    / norm_disp_squared
+                ));
+            }
+        }
+
+
+        const eps = 0.01; // for avoiding divisions too close to 0
+
+        const v_eps: Vec4 = @splat(eps);
+        const v_0: Vec4 = @splat(0);
+        const v_1: Vec4 = @splat(1);
+
+        const disp_from_min_borders: Vec2 = node;
+        const disp_from_max_borders: Vec2 = WORLD_SIZE - node;
+
+        const displacements: Vec4 = simd.join(disp_from_min_borders, disp_from_max_borders);
+
+        const border_forces: Vec4 = @select(
+            f32,
+            displacements > v_0,
+            v_1 / @max(displacements * displacements, v_eps),
+            @max(@log(@fabs(displacements)), v_0),
+        );
+
+        net_force += simd.extract(border_forces, 0, 2) - simd.extract(border_forces, 2, 2);
+
+
+        const v_delta_t: Vec2 = @splat(delta_t);
+
+        const acceleration: Vec2 = net_force / @as(Vec2, @splat(NODE_MASS));
+        var velocity = node_velocities_[node_index] + v_delta_t*acceleration;
+        var speed = @sqrt(dotProduct(velocity, velocity));
+        if (speed > SPEED_LIMIT) {
+            velocity *= @splat(SPEED_LIMIT / speed);
+            speed = SPEED_LIMIT;
+        }
+
+        node_velocities_[node_index] = velocity;
+        speed_of_fastest_node_ = @max(speed_of_fastest_node_, speed);
+
+        nodes[node_index] += v_delta_t * velocity;
+    }
+
+    // for (0..curve_colors_.len) |curve_index| {
+    //     const start_color = @Vector(4, f32) { 1.0, 0.0, 1.0, 0.2 };
+    //     const end_color   = @Vector(4, f32) { 1.0, 0.0, 1.0, 0.2 };
+
+        
+    // }
+
     // @todo @continue
 }
 
@@ -272,6 +417,8 @@ fn draw() !void {
 }
 
 fn init(allocator: Allocator, window_width: u32, window_height: u32) !void {
+
+    rng_ = std.rand.DefaultPrng.init(math.absCast(std.time.timestamp()));
     
     glfw.setErrorCallback(glfwErrorCallback);
     if (!glfw.init(.{})) @panic("Failed to initialize GLFW");
@@ -835,6 +982,9 @@ fn init(allocator: Allocator, window_width: u32, window_height: u32) !void {
     curve_control_points_ = try allocator.alloc(CurveControlPoints, CURVE_COUNT);
     curve_colors_ = try allocator.alloc(CurveColors, CURVE_COUNT);
 
+    node_polarities_ = try allocator.alloc(bool, 4 * CURVE_COUNT);
+    node_velocities_ = try allocator.alloc(Vec2, 4 * CURVE_COUNT);
+
 
     const curve_control_points_size = CURVE_COUNT*@sizeOf(CurveControlPoints);
     const curve_control_points_plus_padding_size =
@@ -1122,6 +1272,15 @@ fn firstMemoryTypeSatisfying(
 fn glfwErrorCallback(_: glfw.ErrorCode, description: [:0]const u8) void {
     const glfw_log = comptime std.log.scoped(.glfw);
     glfw_log.warn("{s}", .{ description });
+}
+
+fn dotProduct(v1: Vec2, v2: Vec2) f32 {
+    return @reduce(.Add, v1 * v2);
+}
+
+fn flipACoin() bool {
+    // @todo maybe an LFSR here would be better. We want speed, not super-good randomness.
+    return rng_.next() & 1;
 }
 
 //
