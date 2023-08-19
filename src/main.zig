@@ -134,8 +134,8 @@ pub fn main() !void {
         };
 
         curve_colors_[curve_index] = CurveColors {
-            .start_color = .{   0, 255, 255, 255 },
-            .end_color   = .{ 255, 255,   0, 255 },
+            .start_color = .{ 0, 0, 0, 0 },
+            .end_color   = .{ 0, 0, 0, 0 },
         };
     }
 
@@ -172,7 +172,7 @@ fn update(delta_t: f32) !void {
     nodes.len = 4 * curve_control_points_.len;
 
 
-    var speed_of_fastest_node_: f32 = 0;
+    var speed_of_fastest_node: f32 = 0;
 
     for (nodes, 0..) |node, node_index| {
 
@@ -243,19 +243,35 @@ fn update(delta_t: f32) !void {
         }
 
         node_velocities_[node_index] = velocity;
-        speed_of_fastest_node_ = @max(speed_of_fastest_node_, speed);
+        speed_of_fastest_node = @max(speed_of_fastest_node, speed);
 
         nodes[node_index] += v_delta_t * velocity;
     }
 
-    // for (0..curve_colors_.len) |curve_index| {
-    //     const start_color = @Vector(4, f32) { 1.0, 0.0, 1.0, 0.2 };
-    //     const end_color   = @Vector(4, f32) { 1.0, 0.0, 1.0, 0.2 };
+    for (0..curve_colors_.len) |curve_index| {
 
-        
-    // }
+        // node 'a' is the curve's first control point, node `b` is its last one.
 
-    // @todo @continue
+        var color_a = [4]f32 { 255, 255, 0, 255 };
+        var color_b = [4]f32 { 0, 255, 255, 255 };
+
+        const node_index_a = 4*curve_index;
+        const node_index_b = node_index_a + 3;
+
+        const vel_a = node_velocities_[node_index_a];
+        const vel_b = node_velocities_[node_index_b];
+
+        if (speed_of_fastest_node == 0) speed_of_fastest_node = 1; // arbitrary non-zero choice
+        const relative_speed_a = @sqrt(dotProduct(vel_a, vel_a)) / speed_of_fastest_node;
+        const relative_speed_b = @sqrt(dotProduct(vel_b, vel_b)) / speed_of_fastest_node;
+
+        color_a[1] *= relative_speed_a;
+        color_b[1] *= relative_speed_b;
+
+
+        for (0..4) |i| curve_colors_[curve_index].start_color[i] = @intFromFloat(color_a[i]);
+        for (0..4) |i| curve_colors_[curve_index].end_color[i]   = @intFromFloat(color_b[i]);
+    }
 }
 
 fn draw() !void {
